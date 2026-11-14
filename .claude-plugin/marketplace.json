@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "postgres-migrations",
+  "owner": {
+    "name": "MubiZero",
+    "url": "https://github.com/MubiZero"
+  },
+  "metadata": {
+    "description": "Skills by MubiZero for Claude Code."
+  },
+  "plugins": [
+    {
+      "name": "postgres-migrations",
+      "source": ".",
+      "description": "Zero-downtime PostgreSQL migration safety: lock levels, expand/contract, CONCURRENTLY, severity-graded review, backup/restore drill.",
+      "version": "1.0.0",
+      "license": "MIT",
+      "homepage": "https://github.com/MubiZero/postgres-migrations",
+      "category": "database",
+      "keywords": ["postgresql", "migrations", "zero-downtime", "database"]
+    }
+  ]
+}
