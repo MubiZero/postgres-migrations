@@ -83,5 +83,7 @@ description: >-
 
 ## Файлы
 
+- `scripts/check_migration.sh` — статический чекер `.sql`-миграций (ловит `CREATE INDEX` без `CONCURRENTLY`, `CONCURRENTLY` внутри `BEGIN`, volatile `DEFAULT now()/gen_random_uuid()`, прямой `SET NOT NULL` и `ALTER TABLE` без `lock_timeout`).
+- `scripts/selftest.sh` и `evals/{bad_locking.sql,good_safe.sql}` — эталонные примеры опасной и безопасной миграции + автотест.
 - `references/lock-levels.md` — какую блокировку берёт конкретная операция и когда это опасно.
 - `references/expand-contract.md` — паттерн безопасного переименования/смены типа/удаления.
