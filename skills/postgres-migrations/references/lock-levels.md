@@ -38,9 +38,10 @@
 - **`CREATE INDEX`** без `CONCURRENTLY` — блокирует запись в таблицу на всё время построения
   индекса. На таблице с живым трафиком это недопустимо вне окна обслуживания; используй
   `CREATE INDEX CONCURRENTLY` (ниже).
-- **`ALTER COLUMN ... SET NOT NULL`** напрямую — сканирует всю таблицу под блокировкой, чтобы
-  проверить отсутствие NULL. Та же задача через `ADD CONSTRAINT ... CHECK (col IS NOT NULL) NOT
-  VALID` + `VALIDATE CONSTRAINT` достигает того же результата без долгой `ACCESS EXCLUSIVE`.
+- **`ALTER COLUMN ... SET NOT NULL` без предварительного валидного CHECK-констрейнта** — сканирует всю таблицу под
+  эксклюзивной блокировкой (`ACCESS EXCLUSIVE`), чтобы проверить отсутствие NULL. Безопасный двухшаговый путь:
+  1) `ADD CONSTRAINT chk_col_nn CHECK (col IS NOT NULL) NOT VALID;` + `VALIDATE CONSTRAINT chk_col_nn;` (идёт под `SHARE UPDATE EXCLUSIVE`, не блокирует чтение и запись);
+  2) На PostgreSQL 12+ после успешного `VALIDATE CONSTRAINT` команда `ALTER COLUMN col SET NOT NULL;` видит уже проверенный констрейнт и выполняется **мгновенно без повторного сканирования таблицы**, после чего временный `chk_col_nn` можно удалить (`DROP CONSTRAINT chk_col_nn`).
 
 ## `CREATE INDEX CONCURRENTLY` — отдельные правила
 

@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "postgres-migrations",
   "displayName": "Postgres Migrations",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Zero-downtime PostgreSQL migration safety for a shared-infra Go backend: lock-level awareness, expand/contract instead of rename/drop in one step, CONCURRENTLY for indexes, severity-graded review before running anything on production, backup/restore drill for runway's G9.",
   "author": {
     "name": "MubiZero",

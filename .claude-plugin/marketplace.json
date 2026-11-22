@@ -13,7 +13,7 @@
       "name": "postgres-migrations",
       "source": ".",
       "description": "Zero-downtime PostgreSQL migration safety: lock levels, expand/contract, CONCURRENTLY, severity-graded review, backup/restore drill.",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "license": "MIT",
       "homepage": "https://github.com/MubiZero/postgres-migrations",
       "category": "database",
