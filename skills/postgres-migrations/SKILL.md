@@ -1,83 +1,36 @@
 ---
 name: postgres-migrations
 description: >-
-  Zero-downtime PostgreSQL migration review & linter (check_migration.sh): lock levels per statement, expand/contract,
-  CREATE INDEX CONCURRENTLY, lock_timeout, batched backfill, and G9 backup/restore check. Применяй перед любой миграцией
-  на боевые данные и на: «миграция не положит прод?», «добавь колонку/индекс безопасно», «ревью миграции»;
+  Zero-downtime PostgreSQL migration review & linter (check_migration.sh): statement lock levels, expand/contract,
+  CREATE INDEX CONCURRENTLY, lock_timeout, batched backfill, and G9 backup/restore verification. Use before any
+  production migration and on: "миграция не положит прод?", "добавь колонку/индекс безопасно", "ревью миграции",
   is this migration safe, zero-downtime migration.
 ---
 
-# postgres-migrations: миграция не должна быть инцидентом
+# postgres-migrations: Zero-Downtime Production Migrations
 
-Миграция, которая ломает прод, почти никогда не ломает его синтаксической ошибкой — ломает
-блокировкой, которую никто не посчитал, или шагом, который предполагает, что старая и новая
-версия приложения никогда не работают одновременно. На общей инфраструктуре с несколькими
-продуктами (как у владельца — Coolify, несколько Go-сервисов на одной базе или соседних базах)
-цена утроена: встал не один продукт.
+Production migrations fail not from syntax errors, but from unmeasured table locks or assuming old and new application code never run simultaneously. On shared infrastructure (e.g., Coolify hosting multiple Go services), a lock stall takes down more than one product.
 
-## Когда применять
+## Workflow
 
-- Перед любой миграцией, которая тронет таблицу с реальными данными на проде, а не только на
-  чистой локальной базе.
-- Если ведёт `runway` — это детализация G9 (бэкап и восстановление) и части G1/G7 (сборка и
-  поведение при сбое), которые G-критерии runway не расписывают по шагам для конкретной СУБД.
+1. **Run the Static Linter & Classify Locks.** Run `bash <skill>/scripts/check_migration.sh <file.sql>` and verify every statement against [references/lock-levels.md](references/lock-levels.md).
+2. **Use Expand/Contract for Renames, Type Changes, and Drops** — see [references/expand-contract.md](references/expand-contract.md). Old app instances still query the old schema during rolling deploys.
+3. **Indexes: Always `CREATE INDEX CONCURRENTLY`** on live tables.
+   - `CONCURRENTLY` cannot run inside a transaction block (`BEGIN ... COMMIT`); disable the migration runner's transaction wrapper for that file.
+   - If a `CONCURRENTLY` build fails mid-way, it leaves an `INVALID` index—drop it with `DROP INDEX CONCURRENTLY` and rebuild.
+4. **Guard DDL with `lock_timeout` and `statement_timeout`.** Prefix catalog-only `ALTER TABLE` statements with `SET LOCAL lock_timeout = '3s'; SET LOCAL statement_timeout = '15s';`. Failing fast and retrying is far safer than queueing `ACCESS EXCLUSIVE` behind a slow query and freezing all table traffic.
+5. **Backfill in Batches.** Never run an unbounded `UPDATE` across millions of rows in one transaction; update 1,000–10,000 rows per batch with a brief pause to avoid long locks and WAL bloat.
+6. **Test on Production-Scale Data & Verify Backup (`runway` G9).** Before any destructive/data-mutating migration, confirm a fresh backup exists and **restore from it was actually tested** (`pg_dump`/`pg_restore` or volume snapshot).
 
-## Поток
+## Pre-Production Checklist (Report in Russian)
+- [ ] Exact lock level named for every SQL statement (`check_migration.sh` clean).
+- [ ] Renames / type changes / drops follow expand/contract across deploy waves.
+- [ ] Indexes use `CONCURRENTLY` outside a transaction block.
+- [ ] `lock_timeout` set on all `ALTER TABLE` statements.
+- [ ] Data backfills run in bounded batches.
+- [ ] Fresh backup verified for restorability; production execution awaits explicit owner command (R5).
 
-1. **Классифицируй операцию по уровню блокировки** — [references/lock-levels.md](references/lock-levels.md),
-   не по интуиции: `ADD COLUMN` с константным умолчанием на PostgreSQL 11+ — не то же самое, что
-   с `DEFAULT now()`, хотя выглядят одинаково в diff'е миграции.
-2. **Переименование, смена типа, удаление колонки/таблицы — через expand/contract**, не одним
-   шагом — [references/expand-contract.md](references/expand-contract.md). Правило простое: ни
-   одна миграция не должна предполагать, что старая версия приложения уже не обращается к
-   старой схеме — при недоступности атомарного деплоя (а она почти всегда недоступна) старый код
-   ещё работает, пока разворачивается новый.
-3. **Индексы — только `CREATE INDEX CONCURRENTLY`** на таблице с живым трафиком, никогда простой
-   `CREATE INDEX` (берёт блокировку, которая держит записи). `CONCURRENTLY` не может выполняться
-   внутри транзакции — если инструмент миграций оборачивает каждый файл в транзакцию по
-   умолчанию (большинство так делают), эту конкретную миграцию нужно явно исключить из обёртки.
-   Упавший `CONCURRENTLY`-индекс остаётся в состоянии `INVALID` и не откатывается сам — его
-   удаляют (`DROP INDEX CONCURRENTLY`, тоже вне транзакции) и пересоздают, не оставляют висеть.
-4. **Долгие операции — с `lock_timeout`, разумным `statement_timeout` и без удержания соединения дольше необходимого.**
-   Короткий `SET LOCAL lock_timeout = '3s'` (секунды, не минуты) перед `ALTER TABLE`, который должен быть
-   мгновенным (переименование колонки в каталоге, не рядов) — если блокировку не удалось
-   получить сразу, значит что-то долгое уже держит таблицу, и лучше явный отказ с ретраем, чем
-   миграция встаёт в очередь блокировок и за ней встаёт весь трафик к этой таблице.
-5. **Обратная засыпка (backfill) данных — батчами**, не одним `UPDATE` по всей таблице: батч
-   обновляет тысячи-десятки тысяч строк, не миллионы разом, с паузой между батчами, чтобы не
-   держать долгую транзакцию и не раздувать WAL за один присест.
-6. **Прогон на копии прод-данных или на стейджинге той же формы**, не только на пустой
-   локальной базе — пустая таблица не покажет блокировку, которая реальна только при миллионах
-   строк и живом трафике.
-7. **Бэкап и восстановление — G9 в runway, здесь конкретика:** перед миграцией, которая меняет
-   данные необратимо (не просто добавляет колонку), подтверди, что свежий бэкап существует и
-   **восстановление из него проверялось** (не просто что бэкап создаётся по расписанию — создание
-   и восстановимость это разные факты). `pg_dump`/`pg_restore` или снэпшот — то, что реально
-   использует инфраструктура проекта, не абстрактный план.
-
-## Чек-лист перед запуском на проде
-
-- [ ] Лок-левел каждого отдельного statement назван, не только общий вердикт «миграция безопасна».
-- [ ] Переименование/смена типа/удаление — expand/contract, не один шаг.
-- [ ] Индексы — `CONCURRENTLY`, вне транзакции миграционного инструмента.
-- [ ] `lock_timeout` выставлен там, где операция должна быть мгновенной.
-- [ ] Backfill — батчами, с паузой.
-- [ ] Миграция прогнана на данных похожего объёма, не на пустой базе.
-- [ ] Бэкап свежий и восстановимость проверена, если миграция необратимо меняет данные.
-- [ ] Запуск на боевых данных — по явной команде владельца (R5 из `working-style`), не по
-      умолчанию «раз написал — значит можно катить».
-
-## Красные линии
-
-- Миграция на боевые данные — только по явной команде, как любое необратимое действие.
-- Не ослабляй constraint/валидацию ради того, чтобы миграция прошла на существующих
-  «грязных» данных — почини данные или назови исключение явно, не убирай проверку молча.
-- Упавшая на середине миграция — состояние системы называется прямо (что применилось, что нет),
-  не «в целом накатилось».
-
-## Файлы
-
-- `scripts/check_migration.sh` — статический чекер `.sql`-миграций (ловит `CREATE INDEX` без `CONCURRENTLY`, `CONCURRENTLY` внутри `BEGIN`, volatile `DEFAULT now()/gen_random_uuid()`, прямой `SET NOT NULL` и `ALTER TABLE` без `lock_timeout`).
-- `scripts/selftest.sh` и `evals/{bad_locking.sql,good_safe.sql}` — эталонные примеры опасной и безопасной миграции + автотест.
-- `references/lock-levels.md` — какую блокировку берёт конкретная операция и когда это опасно.
-- `references/expand-contract.md` — паттерн безопасного переименования/смены типа/удаления.
+## Files
+- `scripts/check_migration.sh` & `scripts/selftest.sh` — static SQL linter and automated tests on `evals/{bad_locking.sql,good_safe.sql}`.
+- `references/lock-levels.md` — lock duration and safety per PostgreSQL DDL operation.
+- `references/expand-contract.md` — step-by-step zero-downtime column rename, type change, and drop patterns.

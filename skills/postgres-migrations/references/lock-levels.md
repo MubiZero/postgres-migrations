@@ -1,66 +1,21 @@
-# Уровни блокировки — по операции, не по интуиции
+# PostgreSQL Lock Levels by Operation
 
-`ALTER TABLE` почти всегда берёт `ACCESS EXCLUSIVE` на саму таблицу на время самой операции —
-разница между «безопасно» и «кладёт прод» почти всегда в том, **сколько длится** операция под
-этой блокировкой: мгновенное обновление каталога или проход по всем строкам таблицы.
+`ALTER TABLE` almost always takes `ACCESS EXCLUSIVE`. The difference between safe and production-breaking is **how long** the lock is held: a sub-millisecond catalog update vs a full table rewrite/scan.
 
-## Безопасно (блокировка мгновенна, не зависит от размера таблицы)
+## Safe (Instant Catalog Update, Independent of Table Size)
+- **`ADD COLUMN` with a constant default** (`DEFAULT 0`, `DEFAULT 'x'`, `DEFAULT false`) on PostgreSQL 11+: stored in `pg_attribute` metadata without rewriting existing rows.
+- **`ADD COLUMN` nullable without default**: instant on all versions.
+- **`DROP COLUMN`**: marks column dropped in catalog; space is reclaimed later by background `VACUUM`.
+- **`ADD CONSTRAINT ... NOT VALID`** (`CHECK` or `FOREIGN KEY`): enforces on new rows immediately without scanning existing rows. Follow with `VALIDATE CONSTRAINT`, which takes only `SHARE UPDATE EXCLUSIVE` (allows concurrent reads and writes).
+- **Rename column/table**: instant catalog update, **but breaks running code**—must use expand/contract (`expand-contract.md`).
 
-- **`ADD COLUMN` с константным умолчанием** (`DEFAULT 0`, `DEFAULT 'x'`, `DEFAULT false`) на
-  PostgreSQL 11 и новее: значение хранится в каталоге как метаданные, старые строки физически не
-  переписываются, блокировка — только на обновление каталога.
-- **`ADD COLUMN` без умолчания** (nullable) — всегда было мгновенным, на любой версии.
-- **`DROP COLUMN`** — помечает колонку удалённой в каталоге, не перезаписывает таблицу сразу
-  (физическая очистка — фоновым `VACUUM`).
-- **`ADD CONSTRAINT ... NOT VALID`** (CHECK или FOREIGN KEY) — добавляет ограничение для новых
-  строк сразу, без прохода по существующим; существующие проверяются отдельной командой
-  `VALIDATE CONSTRAINT`, которая берёт блокировку полегче (`SHARE UPDATE EXCLUSIVE`, не мешает
-  чтению и записи, только одновременным DDL) и может идти долго без вреда трафику.
-- **Переименование колонки/таблицы** — операция в каталоге, сама по себе мгновенна (проблема
-  переименования не в блокировке, а в том, что старый код продолжает использовать старое имя —
-  см. `expand-contract.md`).
-
-## Опасно (блокировка держится, пока обрабатываются все строки)
-
-- **`ADD COLUMN` с volatile-умолчанием** (`DEFAULT now()`, `DEFAULT random()`,
-  `DEFAULT gen_random_uuid()`) — каждая строка получает собственное вычисленное значение,
-  значит таблица физически переписывается целиком, индексы перестраиваются, блокировка держится
-  всё это время **на любой версии PostgreSQL**, включая 11+. Чинится как обычный backfill: добавь
-  колонку nullable без умолчания, заполни батчами, затем `SET DEFAULT` для новых строк (это уже
-  мгновенно) и `SET NOT NULL` при необходимости через `NOT VALID` + `VALIDATE CONSTRAINT`, не
-  через прямой `ALTER COLUMN ... SET NOT NULL`, который тоже проходит по всем строкам одной
-  блокировкой.
-- **Смена типа колонки**, если новый тип не совместим по представлению на диске (например
-  `varchar` → `int`, большинство численных перекодировок) — полная перезапись таблицы.
-  Совместимые без перезаписи случаи существуют (расширение `varchar(n)` до большего `n` или без
-  ограничения, `int` → `bigint` на новых версиях в части случаев), но проверяй конкретную пару
-  типов и версию, не считай по умолчанию, что смена типа дёшева.
-- **`CREATE INDEX`** без `CONCURRENTLY` — блокирует запись в таблицу на всё время построения
-  индекса. На таблице с живым трафиком это недопустимо вне окна обслуживания; используй
-  `CREATE INDEX CONCURRENTLY` (ниже).
-- **`ALTER COLUMN ... SET NOT NULL` без предварительного валидного CHECK-констрейнта** — сканирует всю таблицу под
-  эксклюзивной блокировкой (`ACCESS EXCLUSIVE`), чтобы проверить отсутствие NULL. Безопасный двухшаговый путь:
-  1) `ADD CONSTRAINT chk_col_nn CHECK (col IS NOT NULL) NOT VALID;` + `VALIDATE CONSTRAINT chk_col_nn;` (идёт под `SHARE UPDATE EXCLUSIVE`, не блокирует чтение и запись);
-  2) На PostgreSQL 12+ после успешного `VALIDATE CONSTRAINT` команда `ALTER COLUMN col SET NOT NULL;` видит уже проверенный констрейнт и выполняется **мгновенно без повторного сканирования таблицы**, после чего временный `chk_col_nn` можно удалить (`DROP CONSTRAINT chk_col_nn`).
-
-## `CREATE INDEX CONCURRENTLY` — отдельные правила
-
-- Строит индекс без блокировки записи, ценой того, что делает это в несколько внутренних
-  транзакций с промежуточными коммитами — поэтому **не может выполняться внутри пользовательской
-  транзакции**. Если инструмент миграций оборачивает файл в транзакцию по умолчанию, эту
-  миграцию нужно явно пометить как выполняемую вне транзакции (у большинства инструментов есть
-  такой флаг/аннотация — проверь, какой именно, в документации используемого инструмента, не по
-  памяти о другом инструменте).
-- Упавшая на середине сборка оставляет индекс в состоянии `INVALID`: он не используется
-  планировщиком, но и не исчезает сам. Удали явно (`DROP INDEX CONCURRENTLY имя_индекса`, тоже вне
-  транзакции) и пересоздай — не оставляй невалидный индекс висеть «на потом».
-- Тоже недоступна внутри `DO`-блока/функции PL/pgSQL (это тоже транзакционный контекст) — вызов
-  должен идти с клиентской стороны отдельным statement'ом.
-
-## Что проверить перед тем, как доверять этой таблице
-
-Список выше — общие факты о PostgreSQL, не о конкретной версии проекта. Перед нестандартной
-операцией (смена типа, незнакомая комбинация constraint'ов) — свериться с документацией именно
-той версии PostgreSQL, что используется в проекте: поведение блокировок у отдельных операций
-менялось между мажорными версиями, и ссылка на память о «как это было в другом проекте» не
-заменяет проверку.
+## Dangerous (Holds `ACCESS EXCLUSIVE` Across All Rows)
+- **`ADD COLUMN` with a volatile default** (`DEFAULT now()`, `DEFAULT random()`, `DEFAULT gen_random_uuid()`): rewrites the entire table and rebuilds indexes on **every** PostgreSQL version. *Fix:* add nullable column → backfill in batches → `ALTER COLUMN SET DEFAULT` (instant) → add `NOT NULL` via `CHECK NOT VALID` + `VALIDATE`.
+- **`ALTER COLUMN ... TYPE`** (when binary representation changes, e.g., `varchar → int`): full table rewrite.
+- **`CREATE INDEX` without `CONCURRENTLY`**: takes `SHARE` lock, blocking all `INSERT`/`UPDATE`/`DELETE` until built. Always use `CREATE INDEX CONCURRENTLY` outside a transaction block.
+- **Direct `ALTER COLUMN ... SET NOT NULL` without a prior validated CHECK**: scans the entire table under `ACCESS EXCLUSIVE`.
+  *Zero-downtime path on PostgreSQL 12+:*
+  1. `ALTER TABLE t ADD CONSTRAINT chk_col_nn CHECK (col IS NOT NULL) NOT VALID;`
+  2. `ALTER TABLE t VALIDATE CONSTRAINT chk_col_nn;` (`SHARE UPDATE EXCLUSIVE`, non-blocking)
+  3. `ALTER TABLE t ALTER COLUMN col SET NOT NULL;` (on PG 12+, sees the valid `CHECK` constraint and finishes **instantly without a table scan**)
+  4. `ALTER TABLE t DROP CONSTRAINT chk_col_nn;`
