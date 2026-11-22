@@ -1,16 +1,10 @@
 ---
 name: postgres-migrations
 description: >-
-  Zero-downtime safety review for a PostgreSQL schema or data migration on shared production
-  infrastructure: what lock level each statement actually takes, expand/contract instead of
-  rename/drop in one step, CONCURRENTLY for indexes (and why it can't run inside the same
-  transaction as everything else), a severity grade before anything runs on production, and the
-  backup/restore drill `runway`'s G9 asks for. Применяй, когда просят: «миграция не положит
-  прод?», «добавь колонку/индекс безопасно», «почему ALTER TABLE подвесил запросы», «проверь
-  миграцию перед продом», «ревью миграции»; а также перед любой миграцией на боевые данные. По-
-  английски: is this migration safe, zero-downtime migration, review this migration, will this
-  lock the table. Не для выбора СУБД или схемы данных с нуля — для безопасности конкретной
-  миграции на уже работающей базе.
+  Zero-downtime PostgreSQL migration review & linter (check_migration.sh): lock levels per statement, expand/contract,
+  CREATE INDEX CONCURRENTLY, lock_timeout, batched backfill, and G9 backup/restore check. Применяй перед любой миграцией
+  на боевые данные и на: «миграция не положит прод?», «добавь колонку/индекс безопасно», «ревью миграции»;
+  is this migration safe, zero-downtime migration.
 ---
 
 # postgres-migrations: миграция не должна быть инцидентом
